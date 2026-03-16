@@ -197,6 +197,6 @@ app.get("/feed", requireFirebaseUser, async (req, res) => {
   res.json(result);
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`API listening on port ${PORT}`);
 });
