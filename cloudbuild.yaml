@@ -28,7 +28,7 @@ steps:
         '--region', 'europe-west2',
         '--platform', 'managed',
         '--allow-unauthenticated',
-        '--add-cloudsql-instances', 'final-year-project-489111:europe-west2:sonar',
+        '--add-cloudsql-instances', 'final-year-project-489111:europe-west2:final-year-project',
         '--set-env-vars', 'BUCKET_NAME=sonar_uploads,DB_NAME=Sonar,DB_USER=app_user,DB_PASS=Cooper14?,INSTANCE_CONNECTION_NAME=final-year-project-489111:europe-west2:final-year-project'
       ]
 
