@@ -51,14 +51,41 @@ async function start() {
 
     app.post("/users/me", requireFirebaseUser, async (req, res) => {
       const uid = req.firebaseUid;
-      const q = `
-        INSERT INTO users (firebase_uid)
-        VALUES ($1)
-        ON CONFLICT (firebase_uid) DO NOTHING
-        RETURNING id
-      `;
-      await pool.query(q, [uid]);
-      res.json({ ok: true });
+      const { username } = req.body || {};
+    
+      if (!username || !String(username).trim()) {
+        return res.status(400).json({ error: "username required" });
+      }
+    
+      const cleanedUsername = String(username).trim().toLowerCase();
+    
+      try {
+        // Check if username is already used by a different user
+        const existing = await pool.query(
+          `SELECT id, firebase_uid FROM users WHERE username = $1`,
+          [cleanedUsername]
+        );
+    
+        if (existing.rowCount > 0 && existing.rows[0].firebase_uid !== uid) {
+          return res.status(409).json({ error: "username already taken" });
+        }
+    
+        // Insert or update this user
+        await pool.query(
+          `
+          INSERT INTO users (firebase_uid, username)
+          VALUES ($1, $2)
+          ON CONFLICT (firebase_uid)
+          DO UPDATE SET username = EXCLUDED.username
+          `,
+          [uid, cleanedUsername]
+        );
+    
+        res.json({ ok: true, username: cleanedUsername });
+      } catch (e) {
+        console.error("users/me error:", e);
+        res.status(500).json({ error: "failed to save username" });
+      }
     });
 
     app.post("/uploads/signed-url", requireFirebaseUser, async (req, res) => {
