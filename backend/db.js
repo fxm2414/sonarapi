@@ -10,7 +10,7 @@ const DB_NAME = requireEnv("DB_NAME");
 const DB_USER = requireEnv("DB_USER");
 const DB_PASS = requireEnv("DB_PASS");
 // Example: "final-year-project:europe-west2:sonar"
-const INSTANCE_CONNECTION_NAME = requireEnv("https://sonar-api-75840676273.europe-west2.run.app");
+const INSTANCE_CONNECTION_NAME = requireEnv("INSTANCE_CONNECTION_NAME");
 
 // Cloud SQL Postgres uses a unix socket on Cloud Run:
 const pool = new Pool({
