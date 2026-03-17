@@ -116,7 +116,10 @@ async function start() {
         res.json({ uploadUrl, objectPath });
       } catch (e) {
         console.error("signed-url error:", e);
-        res.status(500).json({ error: "failed to generate signed url" });
+        res.status(500).json({
+          error: "failed to generate signed url",
+          details: e.message || String(e)
+        });
       }
     });
 
