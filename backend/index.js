@@ -188,6 +188,38 @@ async function start() {
     });
 
     app.post("/posts/:postId/replies", requireFirebaseUser, async (req, res) => {
+      const postId = Number(req.params.postId);
+
+      if (!postId || Number.isNaN(postId)) {
+        return res.status(400).json({ error: "invalid post id" });
+      }
+    
+      try {
+        const repliesRes = await pool.query(
+          `SELECT
+              r.id,
+              r.body,
+              r.created_at,
+              COALESCE(u.username, u.firebase_uid) AS author_name
+           FROM post_replies r
+           JOIN users u ON u.id = r.author_user_id
+           WHERE r.post_id = $1
+           ORDER BY r.created_at ASC`,
+          [postId]
+        );
+    
+        const result = repliesRes.rows.map((r) => ({
+          id: r.id,
+          body: r.body,
+          createdAt: r.created_at,
+          authorName: r.author_name
+        }));
+    
+        res.json(result);
+      } catch (e) {
+        console.error("get replies error:", e);
+        res.status(500).json({ error: "failed to load replies" });
+      }
       const uid = req.firebaseUid;
       const postId = Number(req.params.postId);
       const { body } = req.body || {};
