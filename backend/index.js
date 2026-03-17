@@ -30,18 +30,25 @@ async function start() {
     app.use(cors());
     app.use(express.json({ limit: "20mb" }));
 
-    app.get("/health", (req, res) => res.json({ ok: true }));
+    app.get("/health", (req, res) => {
+      res.json({ ok: true });
+    });
 
     async function requireFirebaseUser(req, res, next) {
       try {
         const header = req.headers.authorization || "";
         const match = header.match(/^Bearer (.+)$/);
-        if (!match) return res.status(401).json({ error: "Missing Bearer token" });
+
+        if (!match) {
+          return res.status(401).json({ error: "Missing Bearer token" });
+        }
 
         const idToken = match[1];
         const decoded = await admin.auth().verifyIdToken(idToken);
+
         req.firebaseUid = decoded.uid;
         req.firebaseEmail = decoded.email || null;
+
         next();
       } catch (e) {
         console.error("Auth error:", e);
@@ -52,25 +59,23 @@ async function start() {
     app.post("/users/me", requireFirebaseUser, async (req, res) => {
       const uid = req.firebaseUid;
       const { username } = req.body || {};
-    
+
       if (!username || !String(username).trim()) {
         return res.status(400).json({ error: "username required" });
       }
-    
+
       const cleanedUsername = String(username).trim().toLowerCase();
-    
+
       try {
-        // Check if username is already used by a different user
         const existing = await pool.query(
           `SELECT id, firebase_uid FROM users WHERE username = $1`,
           [cleanedUsername]
         );
-    
+
         if (existing.rowCount > 0 && existing.rows[0].firebase_uid !== uid) {
           return res.status(409).json({ error: "username already taken" });
         }
-    
-        // Insert or update this user
+
         await pool.query(
           `
           INSERT INTO users (firebase_uid, username)
@@ -80,7 +85,7 @@ async function start() {
           `,
           [uid, cleanedUsername]
         );
-    
+
         res.json({ ok: true, username: cleanedUsername });
       } catch (e) {
         console.error("users/me error:", e);
@@ -96,119 +101,217 @@ async function start() {
         return res.status(400).json({ error: "contentType and originalName required" });
       }
 
-      const safeName = String(originalName).replace(/[^a-zA-Z0-9._-]/g, "_");
-      const objectPath = `uploads/${uid}/${Date.now()}-${safeName}`;
+      try {
+        const safeName = String(originalName).replace(/[^a-zA-Z0-9._-]/g, "_");
+        const objectPath = `uploads/${uid}/${Date.now()}-${safeName}`;
+        const file = bucket.file(objectPath);
 
-      const file = bucket.file(objectPath);
+        const [uploadUrl] = await file.getSignedUrl({
+          version: "v4",
+          action: "write",
+          expires: Date.now() + 10 * 60 * 1000,
+          contentType
+        });
 
-      const [uploadUrl] = await file.getSignedUrl({
-        version: "v4",
-        action: "write",
-        expires: Date.now() + 10 * 60 * 1000,
-        contentType
-      });
-
-      res.json({ uploadUrl, objectPath });
+        res.json({ uploadUrl, objectPath });
+      } catch (e) {
+        console.error("signed-url error:", e);
+        res.status(500).json({ error: "failed to generate signed url" });
+      }
     });
 
     app.post("/posts", requireFirebaseUser, async (req, res) => {
       const uid = req.firebaseUid;
       const { title, body, attachments } = req.body || {};
 
-      if (!title || !body) {
-        return res.status(400).json({ error: "title and body required" });
+      if (!title || !String(title).trim()) {
+        return res.status(400).json({ error: "title required" });
       }
 
-      const userRes = await pool.query(`SELECT id FROM users WHERE firebase_uid = $1`, [uid]);
-      if (userRes.rowCount === 0) {
-        await pool.query(`INSERT INTO users (firebase_uid) VALUES ($1) ON CONFLICT DO NOTHING`, [uid]);
+      if (!body || !String(body).trim()) {
+        return res.status(400).json({ error: "body required" });
       }
 
-      const userRes2 = await pool.query(`SELECT id FROM users WHERE firebase_uid = $1`, [uid]);
-      const authorUserId = userRes2.rows[0].id;
-
-      const postRes = await pool.query(
-        `INSERT INTO posts (author_user_id, title, body)
-         VALUES ($1, $2, $3)
-         RETURNING id, created_at`,
-        [authorUserId, title, body]
-      );
-
-      const postId = postRes.rows[0].id;
-
-      const list = Array.isArray(attachments) ? attachments : [];
-      for (const a of list) {
-        if (!a || !a.objectPath) continue;
-        await pool.query(
-          `INSERT INTO post_attachments (post_id, object_path, content_type, original_name)
-           VALUES ($1, $2, $3, $4)`,
-          [postId, a.objectPath, a.contentType || null, a.originalName || null]
+      try {
+        let userRes = await pool.query(
+          `SELECT id FROM users WHERE firebase_uid = $1`,
+          [uid]
         );
+
+        if (userRes.rowCount === 0) {
+          await pool.query(
+            `INSERT INTO users (firebase_uid) VALUES ($1) ON CONFLICT DO NOTHING`,
+            [uid]
+          );
+          userRes = await pool.query(
+            `SELECT id FROM users WHERE firebase_uid = $1`,
+            [uid]
+          );
+        }
+
+        const authorUserId = userRes.rows[0].id;
+
+        const postRes = await pool.query(
+          `INSERT INTO posts (author_user_id, title, body)
+           VALUES ($1, $2, $3)
+           RETURNING id, created_at`,
+          [authorUserId, String(title).trim(), String(body).trim()]
+        );
+
+        const postId = postRes.rows[0].id;
+
+        const list = Array.isArray(attachments) ? attachments : [];
+        for (const a of list) {
+          if (!a || !a.objectPath) continue;
+
+          await pool.query(
+            `INSERT INTO post_attachments (post_id, object_path, content_type, original_name)
+             VALUES ($1, $2, $3, $4)`,
+            [
+              postId,
+              a.objectPath,
+              a.contentType || null,
+              a.originalName || null
+            ]
+          );
+        }
+
+        res.json({
+          ok: true,
+          postId,
+          createdAt: postRes.rows[0].created_at
+        });
+      } catch (e) {
+        console.error("create post error:", e);
+        res.status(500).json({ error: "failed to create post" });
+      }
+    });
+
+    app.post("/posts/:postId/replies", requireFirebaseUser, async (req, res) => {
+      const uid = req.firebaseUid;
+      const postId = Number(req.params.postId);
+      const { body } = req.body || {};
+
+      if (!postId || Number.isNaN(postId)) {
+        return res.status(400).json({ error: "invalid post id" });
       }
 
-      res.json({ ok: true, postId });
+      if (!body || !String(body).trim()) {
+        return res.status(400).json({ error: "reply body required" });
+      }
+
+      try {
+        const userRes = await pool.query(
+          `SELECT id FROM users WHERE firebase_uid = $1`,
+          [uid]
+        );
+
+        if (userRes.rowCount === 0) {
+          return res.status(404).json({ error: "user not found" });
+        }
+
+        const authorUserId = userRes.rows[0].id;
+
+        const postRes = await pool.query(
+          `SELECT id FROM posts WHERE id = $1`,
+          [postId]
+        );
+
+        if (postRes.rowCount === 0) {
+          return res.status(404).json({ error: "post not found" });
+        }
+
+        const replyRes = await pool.query(
+          `INSERT INTO post_replies (post_id, author_user_id, body)
+           VALUES ($1, $2, $3)
+           RETURNING id, created_at`,
+          [postId, authorUserId, String(body).trim()]
+        );
+
+        res.json({
+          ok: true,
+          replyId: replyRes.rows[0].id,
+          createdAt: replyRes.rows[0].created_at
+        });
+      } catch (e) {
+        console.error("create reply error:", e);
+        res.status(500).json({ error: "failed to create reply" });
+      }
     });
 
     app.get("/feed", requireFirebaseUser, async (req, res) => {
-      const postsRes = await pool.query(
-        `SELECT p.id, p.title, p.body, p.created_at,
-                COALESCE(u.username, u.firebase_uid) AS author_name
-         FROM posts p
-         JOIN users u ON u.id = p.author_user_id
-         ORDER BY p.created_at DESC
-         LIMIT 50`
-      );
-
-      const posts = postsRes.rows;
-      const postIds = posts.map(p => p.id);
-
-      let attachmentsByPost = {};
-      if (postIds.length > 0) {
-        const attRes = await pool.query(
-          `SELECT post_id, object_path, content_type, original_name
-           FROM post_attachments
-           WHERE post_id = ANY($1::bigint[])`,
-          [postIds]
+      try {
+        const postsRes = await pool.query(
+          `SELECT
+              p.id,
+              p.title,
+              p.body,
+              p.created_at,
+              COALESCE(u.username, u.firebase_uid) AS author_name,
+              COUNT(r.id)::int AS reply_count
+           FROM posts p
+           JOIN users u ON u.id = p.author_user_id
+           LEFT JOIN post_replies r ON r.post_id = p.id
+           GROUP BY p.id, u.username, u.firebase_uid
+           ORDER BY p.created_at DESC
+           LIMIT 50`
         );
 
-        attachmentsByPost = attRes.rows.reduce((acc, row) => {
-          acc[row.post_id] = acc[row.post_id] || [];
-          acc[row.post_id].push(row);
-          return acc;
-        }, {});
-      }
+        const posts = postsRes.rows;
+        const postIds = posts.map((p) => p.id);
 
-      const result = [];
-      for (const p of posts) {
-        const atts = attachmentsByPost[p.id] || [];
-        const mapped = [];
+        let attachmentsByPost = {};
+        if (postIds.length > 0) {
+          const attRes = await pool.query(
+            `SELECT post_id, object_path, content_type, original_name
+             FROM post_attachments
+             WHERE post_id = ANY($1::bigint[])`,
+            [postIds]
+          );
 
-        for (const a of atts) {
-          const file = bucket.file(a.object_path);
-          const [url] = await file.getSignedUrl({
-            version: "v4",
-            action: "read",
-            expires: Date.now() + 10 * 60 * 1000
-          });
+          attachmentsByPost = attRes.rows.reduce((acc, row) => {
+            if (!acc[row.post_id]) acc[row.post_id] = [];
+            acc[row.post_id].push(row);
+            return acc;
+          }, {});
+        }
 
-          mapped.push({
-            url,
-            contentType: a.content_type,
-            originalName: a.original_name
+        const result = [];
+        for (const p of posts) {
+          const atts = attachmentsByPost[p.id] || [];
+          const mapped = [];
+
+          for (const a of atts) {
+            const file = bucket.file(a.object_path);
+            const [url] = await file.getSignedUrl({
+              version: "v4",
+              action: "read",
+              expires: Date.now() + 10 * 60 * 1000
+            });
+
+            mapped.push({
+              url,
+              contentType: a.content_type,
+              originalName: a.original_name
+            });
+          }
+
+          result.push({
+            id: p.id,
+            title: p.title,
+            body: p.body,
+            createdAt: p.created_at,
+            authorName: p.author_name,
+            attachments: mapped,
+            replyCount: p.reply_count
           });
         }
 
-        result.push({
-          id: p.id,
-          title: p.title,
-          body: p.body,
-          createdAt: p.created_at,
-          authorName: p.author_name,
-          attachments: mapped
-        });
+        res.json(result);
+      } catch (e) {
+        console.error("feed error:", e);
+        res.status(500).json({ error: "failed to load feed" });
       }
-
-      res.json(result);
     });
 
     app.listen(PORT, "0.0.0.0", () => {
