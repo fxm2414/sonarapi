@@ -249,19 +249,22 @@ async function start() {
       const q = String(req.query.q || "").trim().toLowerCase();
     
       try {
+        const viewer = await getDbUserByFirebaseUid(req.firebaseUid);
+        const viewerId = viewer ? viewer.id : null;
+    
         const usersRes = await pool.query(
           `
           SELECT
-            username,
-            username AS display_name
+            COALESCE(username, firebase_uid) AS username,
+            COALESCE(username, firebase_uid) AS display_name
           FROM users
-          WHERE username IS NOT NULL
-            AND username <> ''
-            AND ($1 = '' OR LOWER(username) LIKE $2)
-          ORDER BY username ASC
+          WHERE COALESCE(username, firebase_uid) <> ''
+            AND ($1 = '' OR LOWER(COALESCE(username, firebase_uid)) LIKE $2)
+            AND ($3::bigint IS NULL OR id <> $3)
+          ORDER BY COALESCE(username, firebase_uid) ASC
           LIMIT 30
           `,
-          [q, `%${q}%`]
+          [q, `%${q}%`, viewerId]
         );
     
         const result = usersRes.rows.map((u) => ({
@@ -335,55 +338,55 @@ async function start() {
     });
 
     app.post("/users/:username/follow", requireFirebaseUser, async (req, res) => {
-  const username = String(req.params.username || "").trim().toLowerCase();
-
-  if (!username) {
-    return res.status(400).json({ error: "username required" });
-  }
-
-  try {
-    const viewer = await getDbUserByFirebaseUid(req.firebaseUid);
-
-    if (!viewer) {
-      return res.status(404).json({ error: "viewer not found" });
-    }
-
-    const targetRes = await pool.query(
-      `
-      SELECT id, COALESCE(username, firebase_uid) AS username
-      FROM users
-      WHERE LOWER(COALESCE(username, firebase_uid)) = $1
-      LIMIT 1
-      `,
-      [username]
-    );
-
-    if (targetRes.rowCount === 0) {
-      return res.status(404).json({ error: "user not found" });
-    }
-
-    const target = targetRes.rows[0];
-
-    if (target.id === viewer.id) {
-      return res.status(400).json({ error: "cannot follow yourself" });
-    }
-
-    await pool.query(
-      `
-      INSERT INTO user_follows (follower_user_id, followed_user_id)
-      VALUES ($1, $2)
-      ON CONFLICT DO NOTHING
-      `,
-      [viewer.id, target.id]
-    );
-
-    const updatedProfile = await getProfileDto(viewer.id, username);
-    res.json(updatedProfile);
-  } catch (e) {
-    console.error("follow user error:", e);
-    res.status(500).json({ error: "failed to follow user" });
-  }
-});
+      const username = String(req.params.username || "").trim().toLowerCase();
+    
+      if (!username) {
+        return res.status(400).json({ error: "username required" });
+      }
+    
+      try {
+        const viewer = await getDbUserByFirebaseUid(req.firebaseUid);
+    
+        if (!viewer) {
+          return res.status(404).json({ error: "viewer not found" });
+        }
+    
+        const targetRes = await pool.query(
+          `
+          SELECT id, COALESCE(username, firebase_uid) AS username
+          FROM users
+          WHERE LOWER(COALESCE(username, firebase_uid)) = $1
+          LIMIT 1
+          `,
+          [username]
+        );
+    
+        if (targetRes.rowCount === 0) {
+          return res.status(404).json({ error: "user not found" });
+        }
+    
+        const target = targetRes.rows[0];
+    
+        if (target.id === viewer.id) {
+          return res.status(400).json({ error: "cannot follow yourself" });
+        }
+    
+        await pool.query(
+          `
+          INSERT INTO user_follows (follower_user_id, followed_user_id)
+          VALUES ($1, $2)
+          ON CONFLICT DO NOTHING
+          `,
+          [viewer.id, target.id]
+        );
+    
+        const updatedProfile = await getProfileDto(viewer.id, username);
+        res.json(updatedProfile);
+      } catch (e) {
+        console.error("follow user error:", e);
+        res.status(500).json({ error: "failed to follow user" });
+      }
+    });
 
     app.delete("/users/:username/follow", requireFirebaseUser, async (req, res) => {
       const username = String(req.params.username || "").trim().toLowerCase();
