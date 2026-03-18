@@ -67,6 +67,55 @@ async function start() {
       return res.rowCount > 0 ? res.rows[0] : null;
     }
 
+    async function getUserListByRelation(targetUsername, relation) {
+      const targetRes = await pool.query(
+        `
+        SELECT id
+        FROM users
+        WHERE LOWER(COALESCE(username, firebase_uid)) = $1
+        LIMIT 1
+        `,
+        [targetUsername.toLowerCase()]
+      );
+    
+      if (targetRes.rowCount === 0) {
+        return null;
+      }
+    
+      const targetUserId = targetRes.rows[0].id;
+    
+      let query;
+      if (relation === "followers") {
+        query = `
+          SELECT
+            COALESCE(u.username, u.firebase_uid) AS username,
+            COALESCE(u.username, u.firebase_uid) AS display_name
+          FROM user_follows f
+          JOIN users u ON u.id = f.follower_user_id
+          WHERE f.followed_user_id = $1
+          ORDER BY COALESCE(u.username, u.firebase_uid) ASC
+        `;
+      } else {
+        query = `
+          SELECT
+            COALESCE(u.username, u.firebase_uid) AS username,
+            COALESCE(u.username, u.firebase_uid) AS display_name
+          FROM user_follows f
+          JOIN users u ON u.id = f.followed_user_id
+          WHERE f.follower_user_id = $1
+          ORDER BY COALESCE(u.username, u.firebase_uid) ASC
+        `;
+      }
+    
+      const res = await pool.query(query, [targetUserId]);
+    
+      return res.rows.map((u) => ({
+        username: u.username,
+        displayName: u.display_name,
+        profileImageUrl: null
+      }));
+    }
+
     async function getProfileDto(viewerUserId, username) {
       const res = await pool.query(
         `
@@ -385,6 +434,48 @@ async function start() {
       } catch (e) {
         console.error("follow user error:", e);
         res.status(500).json({ error: "failed to follow user" });
+      }
+    });
+
+    app.get("/users/:username/followers", requireFirebaseUser, async (req, res) => {
+      const username = String(req.params.username || "").trim().toLowerCase();
+    
+      if (!username) {
+        return res.status(400).json({ error: "username required" });
+      }
+    
+      try {
+        const result = await getUserListByRelation(username, "followers");
+    
+        if (result === null) {
+          return res.status(404).json({ error: "user not found" });
+        }
+    
+        res.json(result);
+      } catch (e) {
+        console.error("get followers error:", e);
+        res.status(500).json({ error: "failed to load followers" });
+      }
+    });
+    
+    app.get("/users/:username/following", requireFirebaseUser, async (req, res) => {
+      const username = String(req.params.username || "").trim().toLowerCase();
+    
+      if (!username) {
+        return res.status(400).json({ error: "username required" });
+      }
+    
+      try {
+        const result = await getUserListByRelation(username, "following");
+    
+        if (result === null) {
+          return res.status(404).json({ error: "user not found" });
+        }
+    
+        res.json(result);
+      } catch (e) {
+        console.error("get following error:", e);
+        res.status(500).json({ error: "failed to load following" });
       }
     });
 
