@@ -190,6 +190,38 @@ async function start() {
       }
     });
 
+    app.get("/users/search", requireFirebaseUser, async (req, res) => {
+      const q = String(req.query.q || "").trim().toLowerCase();
+    
+      try {
+        const usersRes = await pool.query(
+          `
+          SELECT
+            username,
+            username AS display_name
+          FROM users
+          WHERE username IS NOT NULL
+            AND username <> ''
+            AND ($1 = '' OR LOWER(username) LIKE $2)
+          ORDER BY username ASC
+          LIMIT 30
+          `,
+          [q, `%${q}%`]
+        );
+    
+        const result = usersRes.rows.map((u) => ({
+          username: u.username,
+          displayName: u.display_name,
+          profileImageUrl: null
+        }));
+    
+        res.json(result);
+      } catch (e) {
+        console.error("user search error:", e);
+        res.status(500).json({ error: "failed to search users" });
+      }
+    });
+
     app.get("/users/:username", requireFirebaseUser, async (req, res) => {
       const username = String(req.params.username || "").trim().toLowerCase();
 
