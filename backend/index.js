@@ -56,6 +56,65 @@ async function start() {
       }
     }
 
+    async function mapAttachmentsForPosts(postIds) {
+      let attachmentsByPost = {};
+
+      if (postIds.length === 0) return attachmentsByPost;
+
+      const attRes = await pool.query(
+        `SELECT post_id, object_path, content_type, original_name
+         FROM post_attachments
+         WHERE post_id = ANY($1::bigint[])`,
+        [postIds]
+      );
+
+      attachmentsByPost = attRes.rows.reduce((acc, row) => {
+        if (!acc[row.post_id]) acc[row.post_id] = [];
+        acc[row.post_id].push(row);
+        return acc;
+      }, {});
+
+      return attachmentsByPost;
+    }
+
+    async function buildPostResponse(posts) {
+      const postIds = posts.map((p) => p.id);
+      const attachmentsByPost = await mapAttachmentsForPosts(postIds);
+
+      const result = [];
+      for (const p of posts) {
+        const atts = attachmentsByPost[p.id] || [];
+        const mapped = [];
+
+        for (const a of atts) {
+          const file = bucket.file(a.object_path);
+          const [url] = await file.getSignedUrl({
+            version: "v4",
+            action: "read",
+            expires: Date.now() + 10 * 60 * 1000
+          });
+
+          mapped.push({
+            url,
+            contentType: a.content_type,
+            originalName: a.original_name
+          });
+        }
+
+        result.push({
+          id: p.id,
+          title: p.title,
+          body: p.body,
+          createdAt: p.created_at,
+          authorName: p.author_name,
+          attachments: mapped,
+          replyCount: p.reply_count
+        });
+      }
+
+      return result;
+    }
+
     app.post("/users/me", requireFirebaseUser, async (req, res) => {
       const uid = req.firebaseUid;
       const { username } = req.body || {};
@@ -90,6 +149,119 @@ async function start() {
       } catch (e) {
         console.error("users/me error:", e);
         res.status(500).json({ error: "failed to save username" });
+      }
+    });
+
+    app.get("/users/me", requireFirebaseUser, async (req, res) => {
+      const uid = req.firebaseUid;
+
+      try {
+        const userRes = await pool.query(
+          `SELECT id, username, firebase_uid
+           FROM users
+           WHERE firebase_uid = $1`,
+          [uid]
+        );
+
+        if (userRes.rowCount === 0) {
+          return res.status(404).json({ error: "user not found" });
+        }
+
+        const user = userRes.rows[0];
+
+        const postsCountRes = await pool.query(
+          `SELECT COUNT(*)::int AS posts_count
+           FROM posts
+           WHERE author_user_id = $1`,
+          [user.id]
+        );
+
+        res.json({
+          username: user.username || user.firebase_uid,
+          displayName: user.username || user.firebase_uid,
+          profileImageUrl: null,
+          followersCount: 0,
+          followingCount: 0,
+          postsCount: postsCountRes.rows[0].posts_count
+        });
+      } catch (e) {
+        console.error("users/me get error:", e);
+        res.status(500).json({ error: "failed to load current user profile" });
+      }
+    });
+
+    app.get("/users/:username", requireFirebaseUser, async (req, res) => {
+      const username = String(req.params.username || "").trim().toLowerCase();
+
+      if (!username) {
+        return res.status(400).json({ error: "username required" });
+      }
+
+      try {
+        const userRes = await pool.query(
+          `SELECT id, username, firebase_uid
+           FROM users
+           WHERE LOWER(username) = $1`,
+          [username]
+        );
+
+        if (userRes.rowCount === 0) {
+          return res.status(404).json({ error: "user not found" });
+        }
+
+        const user = userRes.rows[0];
+
+        const postsCountRes = await pool.query(
+          `SELECT COUNT(*)::int AS posts_count
+           FROM posts
+           WHERE author_user_id = $1`,
+          [user.id]
+        );
+
+        res.json({
+          username: user.username || user.firebase_uid,
+          displayName: user.username || user.firebase_uid,
+          profileImageUrl: null,
+          followersCount: 0,
+          followingCount: 0,
+          postsCount: postsCountRes.rows[0].posts_count
+        });
+      } catch (e) {
+        console.error("get user profile error:", e);
+        res.status(500).json({ error: "failed to load user profile" });
+      }
+    });
+
+    app.get("/users/:username/posts", requireFirebaseUser, async (req, res) => {
+      const username = String(req.params.username || "").trim().toLowerCase();
+
+      if (!username) {
+        return res.status(400).json({ error: "username required" });
+      }
+
+      try {
+        const postsRes = await pool.query(
+          `SELECT
+              p.id,
+              p.title,
+              p.body,
+              p.created_at,
+              COALESCE(u.username, u.firebase_uid) AS author_name,
+              COUNT(r.id)::int AS reply_count
+           FROM posts p
+           JOIN users u ON u.id = p.author_user_id
+           LEFT JOIN post_replies r ON r.post_id = p.id
+           WHERE LOWER(COALESCE(u.username, u.firebase_uid)) = $1
+           GROUP BY p.id, u.username, u.firebase_uid
+           ORDER BY p.created_at DESC`,
+          [username]
+        );
+
+        const result = await buildPostResponse(postsRes.rows);
+        res.json(result);
+      } catch (e) {
+        console.error("get user posts error:", e);
+        res.status(500).json({ error: "failed to load user posts" });
       }
     });
 
@@ -296,56 +468,7 @@ async function start() {
            LIMIT 50`
         );
 
-        const posts = postsRes.rows;
-        const postIds = posts.map((p) => p.id);
-
-        let attachmentsByPost = {};
-        if (postIds.length > 0) {
-          const attRes = await pool.query(
-            `SELECT post_id, object_path, content_type, original_name
-             FROM post_attachments
-             WHERE post_id = ANY($1::bigint[])`,
-            [postIds]
-          );
-
-          attachmentsByPost = attRes.rows.reduce((acc, row) => {
-            if (!acc[row.post_id]) acc[row.post_id] = [];
-            acc[row.post_id].push(row);
-            return acc;
-          }, {});
-        }
-
-        const result = [];
-        for (const p of posts) {
-          const atts = attachmentsByPost[p.id] || [];
-          const mapped = [];
-
-          for (const a of atts) {
-            const file = bucket.file(a.object_path);
-            const [url] = await file.getSignedUrl({
-              version: "v4",
-              action: "read",
-              expires: Date.now() + 10 * 60 * 1000
-            });
-
-            mapped.push({
-              url: url,
-              contentType: a.content_type,
-              originalName: a.original_name
-            });
-          }
-
-          result.push({
-            id: p.id,
-            title: p.title,
-            body: p.body,
-            createdAt: p.created_at,
-            authorName: p.author_name,
-            attachments: mapped,
-            replyCount: p.reply_count
-          });
-        }
-
+        const result = await buildPostResponse(postsRes.rows);
         res.json(result);
       } catch (e) {
         console.error("feed error:", e);
