@@ -56,6 +56,75 @@ async function start() {
       }
     }
 
+    async function getDbUserByFirebaseUid(firebaseUid) {
+      const res = await pool.query(
+        `SELECT id, username, firebase_uid
+         FROM users
+         WHERE firebase_uid = $1`,
+        [firebaseUid]
+      );
+    
+      return res.rowCount > 0 ? res.rows[0] : null;
+    }
+
+    async function getProfileDto(viewerUserId, username) {
+      const res = await pool.query(
+        `
+        SELECT
+          u.id,
+          COALESCE(u.username, u.firebase_uid) AS username,
+          COALESCE(u.username, u.firebase_uid) AS display_name,
+          (
+            SELECT COUNT(*)::int
+            FROM posts p
+            WHERE p.author_user_id = u.id
+          ) AS posts_count,
+          (
+            SELECT COUNT(*)::int
+            FROM user_follows f
+            WHERE f.followed_user_id = u.id
+          ) AS followers_count,
+          (
+            SELECT COUNT(*)::int
+            FROM user_follows f
+            WHERE f.follower_user_id = u.id
+          ) AS following_count,
+          CASE
+            WHEN $2::bigint IS NULL THEN false
+            ELSE EXISTS (
+              SELECT 1
+              FROM user_follows f
+              WHERE f.follower_user_id = $2
+                AND f.followed_user_id = u.id
+            )
+          END AS is_following,
+          CASE
+            WHEN $2::bigint IS NULL THEN false
+            ELSE u.id = $2
+          END AS is_own_profile
+        FROM users u
+        WHERE LOWER(COALESCE(u.username, u.firebase_uid)) = $1
+        LIMIT 1
+        `,
+        [username.toLowerCase(), viewerUserId]
+      );
+    
+      if (res.rowCount === 0) return null;
+    
+      const row = res.rows[0];
+    
+      return {
+        username: row.username,
+        displayName: row.display_name,
+        profileImageUrl: null,
+        followersCount: row.followers_count,
+        followingCount: row.following_count,
+        postsCount: row.posts_count,
+        isFollowing: row.is_following,
+        isOwnProfile: row.is_own_profile
+      };
+    }
+
     async function mapAttachmentsForPosts(postIds) {
       let attachmentsByPost = {};
 
