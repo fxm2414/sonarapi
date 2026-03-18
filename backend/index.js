@@ -222,37 +222,23 @@ async function start() {
     });
 
     app.get("/users/me", requireFirebaseUser, async (req, res) => {
-      const uid = req.firebaseUid;
-
       try {
-        const userRes = await pool.query(
-          `SELECT id, username, firebase_uid
-           FROM users
-           WHERE firebase_uid = $1`,
-          [uid]
-        );
-
-        if (userRes.rowCount === 0) {
+        const viewer = await getDbUserByFirebaseUid(req.firebaseUid);
+    
+        if (!viewer) {
           return res.status(404).json({ error: "user not found" });
         }
-
-        const user = userRes.rows[0];
-
-        const postsCountRes = await pool.query(
-          `SELECT COUNT(*)::int AS posts_count
-           FROM posts
-           WHERE author_user_id = $1`,
-          [user.id]
+    
+        const profile = await getProfileDto(
+          viewer.id,
+          viewer.username || viewer.firebase_uid
         );
-
-        res.json({
-          username: user.username || user.firebase_uid,
-          displayName: user.username || user.firebase_uid,
-          profileImageUrl: null,
-          followersCount: 0,
-          followingCount: 0,
-          postsCount: postsCountRes.rows[0].posts_count
-        });
+    
+        if (!profile) {
+          return res.status(404).json({ error: "user not found" });
+        }
+    
+        res.json(profile);
       } catch (e) {
         console.error("users/me get error:", e);
         res.status(500).json({ error: "failed to load current user profile" });
@@ -293,40 +279,22 @@ async function start() {
 
     app.get("/users/:username", requireFirebaseUser, async (req, res) => {
       const username = String(req.params.username || "").trim().toLowerCase();
-
+    
       if (!username) {
         return res.status(400).json({ error: "username required" });
       }
-
+    
       try {
-        const userRes = await pool.query(
-          `SELECT id, username, firebase_uid
-           FROM users
-           WHERE LOWER(username) = $1`,
-          [username]
-        );
-
-        if (userRes.rowCount === 0) {
+        const viewer = await getDbUserByFirebaseUid(req.firebaseUid);
+        const viewerId = viewer ? viewer.id : null;
+    
+        const profile = await getProfileDto(viewerId, username);
+    
+        if (!profile) {
           return res.status(404).json({ error: "user not found" });
         }
-
-        const user = userRes.rows[0];
-
-        const postsCountRes = await pool.query(
-          `SELECT COUNT(*)::int AS posts_count
-           FROM posts
-           WHERE author_user_id = $1`,
-          [user.id]
-        );
-
-        res.json({
-          username: user.username || user.firebase_uid,
-          displayName: user.username || user.firebase_uid,
-          profileImageUrl: null,
-          followersCount: 0,
-          followingCount: 0,
-          postsCount: postsCountRes.rows[0].posts_count
-        });
+    
+        res.json(profile);
       } catch (e) {
         console.error("get user profile error:", e);
         res.status(500).json({ error: "failed to load user profile" });
@@ -363,6 +331,104 @@ async function start() {
       } catch (e) {
         console.error("get user posts error:", e);
         res.status(500).json({ error: "failed to load user posts" });
+      }
+    });
+
+    app.post("/users/:username/follow", requireFirebaseUser, async (req, res) => {
+  const username = String(req.params.username || "").trim().toLowerCase();
+
+  if (!username) {
+    return res.status(400).json({ error: "username required" });
+  }
+
+  try {
+    const viewer = await getDbUserByFirebaseUid(req.firebaseUid);
+
+    if (!viewer) {
+      return res.status(404).json({ error: "viewer not found" });
+    }
+
+    const targetRes = await pool.query(
+      `
+      SELECT id, COALESCE(username, firebase_uid) AS username
+      FROM users
+      WHERE LOWER(COALESCE(username, firebase_uid)) = $1
+      LIMIT 1
+      `,
+      [username]
+    );
+
+    if (targetRes.rowCount === 0) {
+      return res.status(404).json({ error: "user not found" });
+    }
+
+    const target = targetRes.rows[0];
+
+    if (target.id === viewer.id) {
+      return res.status(400).json({ error: "cannot follow yourself" });
+    }
+
+    await pool.query(
+      `
+      INSERT INTO user_follows (follower_user_id, followed_user_id)
+      VALUES ($1, $2)
+      ON CONFLICT DO NOTHING
+      `,
+      [viewer.id, target.id]
+    );
+
+    const updatedProfile = await getProfileDto(viewer.id, username);
+    res.json(updatedProfile);
+  } catch (e) {
+    console.error("follow user error:", e);
+    res.status(500).json({ error: "failed to follow user" });
+  }
+});
+
+    app.delete("/users/:username/follow", requireFirebaseUser, async (req, res) => {
+      const username = String(req.params.username || "").trim().toLowerCase();
+    
+      if (!username) {
+        return res.status(400).json({ error: "username required" });
+      }
+    
+      try {
+        const viewer = await getDbUserByFirebaseUid(req.firebaseUid);
+    
+        if (!viewer) {
+          return res.status(404).json({ error: "viewer not found" });
+        }
+    
+        const targetRes = await pool.query(
+          `
+          SELECT id, COALESCE(username, firebase_uid) AS username
+          FROM users
+          WHERE LOWER(COALESCE(username, firebase_uid)) = $1
+          LIMIT 1
+          `,
+          [username]
+        );
+    
+        if (targetRes.rowCount === 0) {
+          return res.status(404).json({ error: "user not found" });
+        }
+    
+        const target = targetRes.rows[0];
+    
+        await pool.query(
+          `
+          DELETE FROM user_follows
+          WHERE follower_user_id = $1
+            AND followed_user_id = $2
+          `,
+          [viewer.id, target.id]
+        );
+    
+        const updatedProfile = await getProfileDto(viewer.id, username);
+        res.json(updatedProfile);
+      } catch (e) {
+        console.error("unfollow user error:", e);
+        res.status(500).json({ error: "failed to unfollow user" });
       }
     });
 
