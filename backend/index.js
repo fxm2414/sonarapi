@@ -713,8 +713,15 @@ async function start() {
 
     app.get("/feed", requireFirebaseUser, async (req, res) => {
       try {
+        const viewer = await getDbUserByFirebaseUid(req.firebaseUid);
+    
+        if (!viewer) {
+          return res.status(404).json({ error: "user not found" });
+        }
+    
         const postsRes = await pool.query(
-          `SELECT
+          `
+          SELECT
               p.id,
               p.title,
               p.body,
@@ -724,11 +731,20 @@ async function start() {
            FROM posts p
            JOIN users u ON u.id = p.author_user_id
            LEFT JOIN post_replies r ON r.post_id = p.id
+           WHERE
+             p.author_user_id = $1
+             OR p.author_user_id IN (
+               SELECT followed_user_id
+               FROM user_follows
+               WHERE follower_user_id = $1
+             )
            GROUP BY p.id, u.username, u.firebase_uid
            ORDER BY p.created_at DESC
-           LIMIT 50`
+           LIMIT 50
+          `,
+          [viewer.id]
         );
-
+    
         const result = await buildPostResponse(postsRes.rows);
         res.json(result);
       } catch (e) {
