@@ -30,6 +30,79 @@ async function start() {
     app.use(cors());
     app.use(express.json({ limit: "20mb" }));
 
+    const DEFAULT_TAGS = new Set([
+      "Announcement",
+      "Question",
+      "Discussion"
+    ]);
+
+    const AUDIO_TYPE_TAGS = new Set([
+      "Demo",
+      "Full",
+      "Loop",
+      "Sample"
+    ]);
+
+    const AUDIO_TOOL_TAGS = new Set([
+      "Ableton",
+      "FL Studio",
+      "GarageBand",
+      "Logic",
+      "TidalCycles",
+      "SuperCollider"
+    ]);
+
+    const ALL_ALLOWED_TAGS = new Set([
+      ...DEFAULT_TAGS,
+      ...AUDIO_TYPE_TAGS,
+      ...AUDIO_TOOL_TAGS
+    ]);
+
+    function normalizeTags(input) {
+      if (!Array.isArray(input)) return [];
+
+      const cleaned = input
+        .map((tag) => String(tag || "").trim())
+        .filter(Boolean);
+
+      return [...new Set(cleaned)];
+    }
+
+    function hasAudioAttachment(attachments) {
+      if (!Array.isArray(attachments)) return false;
+
+      return attachments.some((a) => {
+        const contentType = String(a?.contentType || "");
+        return contentType.startsWith("audio/");
+      });
+    }
+
+    function validatePostTags(tags, attachments) {
+      const normalizedTags = normalizeTags(tags);
+      const audioAttached = hasAudioAttachment(attachments);
+
+      for (const tag of normalizedTags) {
+        if (!ALL_ALLOWED_TAGS.has(tag)) {
+          return { ok: false, error: `invalid tag: ${tag}` };
+        }
+
+        const isAudioOnlyTag =
+          AUDIO_TYPE_TAGS.has(tag) || AUDIO_TOOL_TAGS.has(tag);
+
+        if (isAudioOnlyTag && !audioAttached) {
+          return {
+            ok: false,
+            error: `tag "${tag}" requires an audio attachment`
+          };
+        }
+      }
+
+      return {
+        ok: true,
+        tags: normalizedTags
+      };
+    }
+
     app.get("/health", (req, res) => {
       res.json({ ok: true });
     });
@@ -63,7 +136,7 @@ async function start() {
          WHERE firebase_uid = $1`,
         [firebaseUid]
       );
-    
+
       return res.rowCount > 0 ? res.rows[0] : null;
     }
 
@@ -77,13 +150,13 @@ async function start() {
         `,
         [targetUsername.toLowerCase()]
       );
-    
+
       if (targetRes.rowCount === 0) {
         return null;
       }
-    
+
       const targetUserId = targetRes.rows[0].id;
-    
+
       let query;
       if (relation === "followers") {
         query = `
@@ -106,9 +179,9 @@ async function start() {
           ORDER BY COALESCE(u.username, u.firebase_uid) ASC
         `;
       }
-    
+
       const res = await pool.query(query, [targetUserId]);
-    
+
       return res.rows.map((u) => ({
         username: u.username,
         displayName: u.display_name,
@@ -157,11 +230,11 @@ async function start() {
         `,
         [username.toLowerCase(), viewerUserId]
       );
-    
+
       if (res.rowCount === 0) return null;
-    
+
       const row = res.rows[0];
-    
+
       return {
         username: row.username,
         displayName: row.display_name,
@@ -226,6 +299,7 @@ async function start() {
           createdAt: p.created_at,
           authorName: p.author_name,
           attachments: mapped,
+          tags: Array.isArray(p.tags) ? p.tags : [],
           replyCount: p.reply_count
         });
       }
@@ -273,20 +347,20 @@ async function start() {
     app.get("/users/me", requireFirebaseUser, async (req, res) => {
       try {
         const viewer = await getDbUserByFirebaseUid(req.firebaseUid);
-    
+
         if (!viewer) {
           return res.status(404).json({ error: "user not found" });
         }
-    
+
         const profile = await getProfileDto(
           viewer.id,
           viewer.username || viewer.firebase_uid
         );
-    
+
         if (!profile) {
           return res.status(404).json({ error: "user not found" });
         }
-    
+
         res.json(profile);
       } catch (e) {
         console.error("users/me get error:", e);
@@ -296,11 +370,11 @@ async function start() {
 
     app.get("/users/search", requireFirebaseUser, async (req, res) => {
       const q = String(req.query.q || "").trim().toLowerCase();
-    
+
       try {
         const viewer = await getDbUserByFirebaseUid(req.firebaseUid);
         const viewerId = viewer ? viewer.id : null;
-    
+
         const usersRes = await pool.query(
           `
           SELECT
@@ -315,13 +389,13 @@ async function start() {
           `,
           [q, `%${q}%`, viewerId]
         );
-    
+
         const result = usersRes.rows.map((u) => ({
           username: u.username,
           displayName: u.display_name,
           profileImageUrl: null
         }));
-    
+
         res.json(result);
       } catch (e) {
         console.error("user search error:", e);
@@ -331,21 +405,21 @@ async function start() {
 
     app.get("/users/:username", requireFirebaseUser, async (req, res) => {
       const username = String(req.params.username || "").trim().toLowerCase();
-    
+
       if (!username) {
         return res.status(400).json({ error: "username required" });
       }
-    
+
       try {
         const viewer = await getDbUserByFirebaseUid(req.firebaseUid);
         const viewerId = viewer ? viewer.id : null;
-    
+
         const profile = await getProfileDto(viewerId, username);
-    
+
         if (!profile) {
           return res.status(404).json({ error: "user not found" });
         }
-    
+
         res.json(profile);
       } catch (e) {
         console.error("get user profile error:", e);
@@ -367,13 +441,14 @@ async function start() {
               p.title,
               p.body,
               p.created_at,
+              p.tags,
               COALESCE(u.username, u.firebase_uid) AS author_name,
               COUNT(r.id)::int AS reply_count
            FROM posts p
            JOIN users u ON u.id = p.author_user_id
            LEFT JOIN post_replies r ON r.post_id = p.id
            WHERE LOWER(COALESCE(u.username, u.firebase_uid)) = $1
-           GROUP BY p.id, u.username, u.firebase_uid
+           GROUP BY p.id, p.tags, u.username, u.firebase_uid
            ORDER BY p.created_at DESC`,
           [username]
         );
@@ -388,18 +463,18 @@ async function start() {
 
     app.post("/users/:username/follow", requireFirebaseUser, async (req, res) => {
       const username = String(req.params.username || "").trim().toLowerCase();
-    
+
       if (!username) {
         return res.status(400).json({ error: "username required" });
       }
-    
+
       try {
         const viewer = await getDbUserByFirebaseUid(req.firebaseUid);
-    
+
         if (!viewer) {
           return res.status(404).json({ error: "viewer not found" });
         }
-    
+
         const targetRes = await pool.query(
           `
           SELECT id, COALESCE(username, firebase_uid) AS username
@@ -409,17 +484,17 @@ async function start() {
           `,
           [username]
         );
-    
+
         if (targetRes.rowCount === 0) {
           return res.status(404).json({ error: "user not found" });
         }
-    
+
         const target = targetRes.rows[0];
-    
+
         if (target.id === viewer.id) {
           return res.status(400).json({ error: "cannot follow yourself" });
         }
-    
+
         await pool.query(
           `
           INSERT INTO user_follows (follower_user_id, followed_user_id)
@@ -428,7 +503,7 @@ async function start() {
           `,
           [viewer.id, target.id]
         );
-    
+
         const updatedProfile = await getProfileDto(viewer.id, username);
         res.json(updatedProfile);
       } catch (e) {
@@ -439,39 +514,39 @@ async function start() {
 
     app.get("/users/:username/followers", requireFirebaseUser, async (req, res) => {
       const username = String(req.params.username || "").trim().toLowerCase();
-    
+
       if (!username) {
         return res.status(400).json({ error: "username required" });
       }
-    
+
       try {
         const result = await getUserListByRelation(username, "followers");
-    
+
         if (result === null) {
           return res.status(404).json({ error: "user not found" });
         }
-    
+
         res.json(result);
       } catch (e) {
         console.error("get followers error:", e);
         res.status(500).json({ error: "failed to load followers" });
       }
     });
-    
+
     app.get("/users/:username/following", requireFirebaseUser, async (req, res) => {
       const username = String(req.params.username || "").trim().toLowerCase();
-    
+
       if (!username) {
         return res.status(400).json({ error: "username required" });
       }
-    
+
       try {
         const result = await getUserListByRelation(username, "following");
-    
+
         if (result === null) {
           return res.status(404).json({ error: "user not found" });
         }
-    
+
         res.json(result);
       } catch (e) {
         console.error("get following error:", e);
@@ -481,18 +556,18 @@ async function start() {
 
     app.delete("/users/:username/follow", requireFirebaseUser, async (req, res) => {
       const username = String(req.params.username || "").trim().toLowerCase();
-    
+
       if (!username) {
         return res.status(400).json({ error: "username required" });
       }
-    
+
       try {
         const viewer = await getDbUserByFirebaseUid(req.firebaseUid);
-    
+
         if (!viewer) {
           return res.status(404).json({ error: "viewer not found" });
         }
-    
+
         const targetRes = await pool.query(
           `
           SELECT id, COALESCE(username, firebase_uid) AS username
@@ -502,13 +577,13 @@ async function start() {
           `,
           [username]
         );
-    
+
         if (targetRes.rowCount === 0) {
           return res.status(404).json({ error: "user not found" });
         }
-    
+
         const target = targetRes.rows[0];
-    
+
         await pool.query(
           `
           DELETE FROM user_follows
@@ -517,7 +592,7 @@ async function start() {
           `,
           [viewer.id, target.id]
         );
-    
+
         const updatedProfile = await getProfileDto(viewer.id, username);
         res.json(updatedProfile);
       } catch (e) {
@@ -558,7 +633,7 @@ async function start() {
 
     app.post("/posts", requireFirebaseUser, async (req, res) => {
       const uid = req.firebaseUid;
-      const { title, body, attachments } = req.body || {};
+      const { title, body, attachments, tags } = req.body || {};
 
       if (!title || !String(title).trim()) {
         return res.status(400).json({ error: "title required" });
@@ -566,6 +641,11 @@ async function start() {
 
       if (!body || !String(body).trim()) {
         return res.status(400).json({ error: "body required" });
+      }
+
+      const validatedTags = validatePostTags(tags, attachments);
+      if (!validatedTags.ok) {
+        return res.status(400).json({ error: validatedTags.error });
       }
 
       try {
@@ -589,10 +669,15 @@ async function start() {
         const authorUserId = userRes.rows[0].id;
 
         const postRes = await pool.query(
-          `INSERT INTO posts (author_user_id, title, body)
-           VALUES ($1, $2, $3)
+          `INSERT INTO posts (author_user_id, title, body, tags)
+           VALUES ($1, $2, $3, $4::text[])
            RETURNING id, created_at`,
-          [authorUserId, String(title).trim(), String(body).trim()]
+          [
+            authorUserId,
+            String(title).trim(),
+            String(body).trim(),
+            validatedTags.tags
+          ]
         );
 
         const postId = postRes.rows[0].id;
@@ -616,7 +701,8 @@ async function start() {
         res.json({
           ok: true,
           postId,
-          createdAt: postRes.rows[0].created_at
+          createdAt: postRes.rows[0].created_at,
+          tags: validatedTags.tags
         });
       } catch (e) {
         console.error("create post error:", e);
@@ -713,38 +799,23 @@ async function start() {
 
     app.get("/feed", requireFirebaseUser, async (req, res) => {
       try {
-        const viewer = await getDbUserByFirebaseUid(req.firebaseUid);
-    
-        if (!viewer) {
-          return res.status(404).json({ error: "user not found" });
-        }
-    
         const postsRes = await pool.query(
-          `
-          SELECT
+          `SELECT
               p.id,
               p.title,
               p.body,
               p.created_at,
+              p.tags,
               COALESCE(u.username, u.firebase_uid) AS author_name,
               COUNT(r.id)::int AS reply_count
            FROM posts p
            JOIN users u ON u.id = p.author_user_id
            LEFT JOIN post_replies r ON r.post_id = p.id
-           WHERE
-             p.author_user_id = $1
-             OR p.author_user_id IN (
-               SELECT followed_user_id
-               FROM user_follows
-               WHERE follower_user_id = $1
-             )
-           GROUP BY p.id, u.username, u.firebase_uid
+           GROUP BY p.id, p.tags, u.username, u.firebase_uid
            ORDER BY p.created_at DESC
-           LIMIT 50
-          `,
-          [viewer.id]
+           LIMIT 50`
         );
-    
+
         const result = await buildPostResponse(postsRes.rows);
         res.json(result);
       } catch (e) {
