@@ -1,17 +1,36 @@
+# Cloud Build configuration file for the SONAR backend
+# This file automates building the backend Docker image,
+# pushing it to Google Container Registry, and deploying it to Cloud Run.
+
 options:
+  # Sends build logs directly to Google Cloud Logging
+  # so deployment output can be reviewed in the Google Cloud Console.
   logging: CLOUD_LOGGING_ONLY
 
 steps:
+  # STEP 1:
+  # Build a Docker image for the backend service.
+  # The build is run from inside the 'backend' folder,
+  # where the Dockerfile and server code are located.
   - name: 'gcr.io/cloud-builders/docker'
     dir: 'backend'
     args:
       [
         'build',
+        # Tags the built image with the current Google Cloud project ID
+        # and names it 'sonar-api:latest'.
         '-t', 'gcr.io/$PROJECT_ID/sonar-api:latest',
+
+        # Explicitly tells Docker which Dockerfile to use.
         '-f', 'Dockerfile',
+
+        # Uses the current backend directory as the build context.
         '.'
       ]
 
+  # STEP 2:
+  # Push the newly built Docker image to Google Container Registry
+  # so it can be used for deployment to Cloud Run.
   - name: 'gcr.io/cloud-builders/docker'
     args:
       [
@@ -19,18 +38,46 @@ steps:
         'gcr.io/$PROJECT_ID/sonar-api:latest'
       ]
 
+  # STEP 3:
+  # Deploy the pushed image to Google Cloud Run.
+  # Cloud Run hosts the Node.js backend as a managed container service.
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       [
         'run', 'deploy', 'sonar-api',
+
+        # Specifies which container image should be deployed.
         '--image', 'gcr.io/$PROJECT_ID/sonar-api:latest',
+
+        # Deploys the service to the europe-west2 region.
         '--region', 'europe-west2',
+
+        # Uses the fully managed Cloud Run platform.
         '--platform', 'managed',
+
+        # Allows requests from the client app without requiring
+        # Cloud Run specific authentication at the HTTP level.
         '--allow-unauthenticated',
+
+        # Connects the deployed service to the Cloud SQL instance
+        # so the backend can access the PostgreSQL database.
         '--add-cloudsql-instances', 'final-year-project-489111:europe-west2:final-year-project',
+
+        # Sets environment variables used by the backend at runtime.
+        # These values are read in the Node.js server code to connect
+        # to storage and the PostgreSQL database.
         '--set-env-vars', 'BUCKET_NAME=sonar_uploads,DB_NAME=Sonar,DB_USER=app_user,DB_PASS=Cooper14?,INSTANCE_CONNECTION_NAME=final-year-project-489111:europe-west2:final-year-project'
       ]
 
+# Records the image produced by this build.
+# This makes the image visible in Cloud Build results.
 images:
   - 'gcr.io/$PROJECT_ID/sonar-api:latest'
+
+# References:
+# 1. Google Cloud Build documentation:
+#    https://cloud.google.com/build/docs/build-config-file-schema
+# 2. Google Cloud Run deployment documentation:
+#    https://cloud.google.com/run/docs/deploying
+# 3. Docker build/push command structure adapted from standard Google Cloud examples.
