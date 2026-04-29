@@ -20,7 +20,7 @@ const DB_PASS = requireEnv("DB_PASS");
 
 // Cloud SQL instance connection name in the format:
 // "<project-id>:<region>:<instance-name>"
-const INSTANCE_CONNECTION_NAME = requireEnv("Sonar");
+const INSTANCE_CONNECTION_NAME = requireEnv("INSTANCE_CONNECTION_NAME");
 
 // Create a PostgreSQL connection pool.
 // A connection pool allows multiple queries to be handled efficiently
@@ -33,8 +33,8 @@ const pool = new Pool({
   // IMPORTANT:
   // On Google Cloud Run, Cloud SQL is accessed via a Unix socket,
   // not a traditional TCP/IP host and port.
-  // The socket is mounted at /cloudsql/<Sonar>.
-  host: `/cloudsql/${Sonar}`,
+  // The socket is mounted at /cloudsql/<INSTANCE_CONNECTION_NAME>.
+  host: `/cloudsql/${INSTANCE_CONNECTION_NAME}`,
 
   // Maximum number of concurrent connections in the pool.
   // Kept low here (5) to suit Cloud Run’s lightweight scaling model.
